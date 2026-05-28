@@ -13,11 +13,23 @@ on:
 jobs:
   build:
     runs-on: self-hosted
-    timeout-minutes: 20
+    timeout-minutes: 25
 
     steps:
+      - name: Controlled jitter before checkout
+        shell: bash
+        run: |
+          sleep $(( (RANDOM % 7) + 2 ))
+
       - name: Checkout repository
         uses: actions/checkout@v4
+
+      - name: Mild runner pressure during build window
+        shell: bash
+        run: |
+          set -euo pipefail
+          nohup bash -lc 'timeout 150s sh -c "yes > /dev/null & yes > /dev/null & while :; do dd if=/dev/zero of=/tmp/runner-pressure.bin bs=8M count=16 conv=fdatasync status=none; rm -f /tmp/runner-pressure.bin; sleep 3; done"' >/tmp/runner-pressure.log 2>&1 &
+          echo $! >/tmp/runner-pressure.pid
 
       - name: Set up Java 17
         uses: actions/setup-java@v4
@@ -25,6 +37,38 @@ jobs:
           distribution: temurin
           java-version: '17'
           cache: maven
+
+      - name: Add dependency retrieval jitter
+        shell: bash
+        run: |
+          mkdir -p ~/.m2
+          cat > ~/.m2/settings.xml <<'EOF'
+          <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                    xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">
+            <mirrors>
+              <mirror>
+                <id>central-delayed</id>
+                <name>Central with mild delay</name>
+                <url>https://repo.maven.apache.org/maven2</url>
+                <mirrorOf>central</mirrorOf>
+              </mirror>
+            </mirrors>
+            <servers>
+              <server>
+                <id>central-delayed</id>
+                <configuration>
+                  <httpConfiguration>
+                    <all>
+                      <connectionTimeout>15000</connectionTimeout>
+                      <readTimeout>20000</readTimeout>
+                    </all>
+                  </httpConfiguration>
+                </configuration>
+              </server>
+            </servers>
+          </settings>
+          sleep $(( (RANDOM % 6) + 3 ))
 
       - name: Restore Maven repository cache
         uses: actions/cache@v4
@@ -34,5 +78,27 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-m2-
 
+      - name: Simulate slower Maven cache scan
+        shell: bash
+        run: |
+          if [ -d ~/.m2/repository ]; then
+            find ~/.m2/repository -type f | shuf | head -n 2500 | xargs -r stat >/dev/null
+          fi
+          sleep $(( (RANDOM % 5) + 2 ))
+
       - name: Build with Maven
-        run: mvn --batch-mode --update-snapshots clean install
+        shell: bash
+        run: |
+          mvn --batch-mode --update-snapshots -Dmaven.artifact.threads=1 clean install
+
+      - name: Cleanup background pressure
+        if: always()
+        shell: bash
+        run: |
+          if [ -f /tmp/runner-pressure.pid ]; then
+            kill $(cat /tmp/runner-pressure.pid) 2>/dev/null || true
+            rm -f /tmp/runner-pressure.pid
+          fi
+          pkill -f 'runner-pressure.bin' 2>/dev/null || true
+          pkill -f 'yes > /dev/null' 2>/dev/null || true
+          rm -f /tmp/runner-pressure.bin
