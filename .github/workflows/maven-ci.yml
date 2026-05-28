@@ -89,7 +89,7 @@ jobs:
       - name: Build with Maven
         shell: bash
         run: |
-          mvn --batch-mode --update-snapshots -Dmaven.artifact.threads=1 clean install
+          mvn --batch-mode --update-snapshots -s ~/.m2/settings.xml -Dmaven.artifact.threads=1 clean install
 
       - name: Cleanup background pressure
         if: always()
